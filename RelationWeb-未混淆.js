@@ -13,6 +13,8 @@ const RWErr = (...a) => console.error("[RelationWeb]", ...a);
  
 const RW_SAVE_MAX_CHARS = 8 * 1024 * 1024;
  
+const RW_PAYLOAD_MAX_CHARS = 4 * 1024 * 1024;
+ 
 const RW_MAX_PERSONS = 20000;
 const RW_MAX_EDGES = 50000;
 let RWMaxWarned = false;
@@ -37,6 +39,73 @@ const RWStorage = {
 		try { localStorage.removeItem(key); } catch (e) {   }
 	},
 };
+
+ 
+
+ 
+function RWSerializeCompact(state) {
+	const persons = [];
+	for (const p of state.persons) {
+		const o = { i: p.id, n: p.nums };
+		if (p.numNames && Object.keys(p.numNames).length) o.nn = p.numNames;
+		if (p.names && Object.keys(p.names).length) o.ns = p.names;
+		if (p.nicknames && Object.keys(p.nicknames).length) o.nk = p.nicknames;
+		if (p.numDescs && Object.keys(p.numDescs).length) o.nd = p.numDescs;
+		if (p.title) o.t = p.title;
+		if (p.desc) o.d = p.desc;
+		if (p.note) o.nt = p.note;
+		if (p.first) o.f = Math.floor(p.first / 1000);
+		if (p.last) o.l = Math.floor(p.last / 1000);
+		if (p.isSelf) o.s = 1;
+		if (p.ownsOwnAlt) o.o = 1;
+		persons.push(o);
+	}
+	const edges = [];
+	for (const e of state.edges) {
+		const o = { a: e.a, b: e.b, k: e.kind };
+		if (e.aNums && e.aNums.length) o.an = e.aNums;
+		if (e.bNums && e.bNums.length) o.bn = e.bNums;
+		if (e.since) o.sn = Math.floor(e.since / 1000);
+		if (e.last) o.l = Math.floor(e.last / 1000);
+		edges.push(o);
+	}
+	return JSON.stringify({ c: 1, v: state.v, m: state.maxPersonId, ps: persons, es: edges });
+}
+
+ 
+function RWInflateCompact(s) {
+	if (!s || typeof s !== "object" || !Array.isArray(s.ps)) return s;
+	const out = { v: s.v || 2, maxPersonId: s.m || 0, persons: [], edges: [] };
+	for (const p of s.ps) {
+		if (!p || !Array.isArray(p.n) || typeof p.i !== "string") continue;
+		out.persons.push({
+			id: p.i,
+			nums: p.n,
+			numNames: (p.nn && typeof p.nn === "object" && !Array.isArray(p.nn)) ? p.nn : {},
+			names: (p.ns && typeof p.ns === "object" && !Array.isArray(p.ns)) ? p.ns : {},
+			nicknames: (p.nk && typeof p.nk === "object" && !Array.isArray(p.nk)) ? p.nk : {},
+			numDescs: (p.nd && typeof p.nd === "object" && !Array.isArray(p.nd)) ? p.nd : {},
+			title: typeof p.t === "string" ? p.t : "",
+			desc: typeof p.d === "string" ? p.d : "",
+			note: typeof p.nt === "string" ? p.nt : "",
+			first: Number.isFinite(p.f) ? p.f * 1000 : 0,
+			last: Number.isFinite(p.l) ? p.l * 1000 : 0,
+			isSelf: !!p.s,
+			ownsOwnAlt: !!p.o,
+		});
+	}
+	for (const e of (s.es || [])) {
+		if (!e || (e.k !== "owner" && e.k !== "lover" && e.k !== "friend")) continue;
+		out.edges.push({
+			a: e.a, b: e.b, kind: e.k,
+			aNums: Array.isArray(e.an) ? e.an : [],
+			bNums: Array.isArray(e.bn) ? e.bn : [],
+			since: Number.isFinite(e.sn) ? e.sn * 1000 : 0,
+			last: Number.isFinite(e.l) ? e.l * 1000 : 0,
+		});
+	}
+	return out;
+}
 
  
 
@@ -66,6 +135,9 @@ const RWStore = {
 			if (!p.numNames || typeof p.numNames !== "object" || Array.isArray(p.numNames)) p.numNames = {};
 			if (!p.nicknames || typeof p.nicknames !== "object" || Array.isArray(p.nicknames)) p.nicknames = {};
 			if (!p.numDescs || typeof p.numDescs !== "object" || Array.isArray(p.numDescs)) p.numDescs = {};
+			if (typeof p.title !== "string") p.title = "";
+			if (typeof p.desc !== "string") p.desc = "";
+			if (typeof p.note !== "string") p.note = "";
 			
 			if (legacyDesc && typeof p.desc === "string" && p.desc && p.nums.length === 1 && !Object.prototype.hasOwnProperty.call(p.numDescs, String(p.nums[0]))) {
 				p.numDescs[String(p.nums[0])] = p.desc;
@@ -91,7 +163,7 @@ const RWStore = {
 			try { json = LZString.decompressFromUTF16(raw.slice(4)) || ""; } catch (e) { return null; }
 		}
 		try {
-			const s = JSON.parse(json);
+			const s = RWInflateCompact(JSON.parse(json));
 			if (s && typeof s === "object" && Array.isArray(s.persons) && Array.isArray(s.edges)) return s;
 		} catch (e) {   }
 		return null;
@@ -111,7 +183,8 @@ const RWStore = {
 	save() {
 		if (!this.state || !this.accountNum) return false; 
 		try {
-			const json = JSON.stringify(this.state);
+			
+			const json = RWSerializeCompact(this.state);
 			
 			
 			if (json.length > RW_SAVE_MAX_CHARS) {
@@ -128,6 +201,14 @@ const RWStore = {
 					const compressed = LZString.compressToUTF16(json);
 					if (compressed && compressed.length < json.length) payload = "RWZ:" + compressed;
 				} catch (e) {   }
+			}
+			
+			if (payload.length > RW_PAYLOAD_MAX_CHARS) {
+				if (!RWStore._sizeWarned) {
+					RWStore._sizeWarned = true;
+					RWLog("压缩后数据仍超过落盘上限（" + (RW_PAYLOAD_MAX_CHARS / 1048576) + "MB），暂停写入本地存储（当前会话数据仍在内存中，请导出 txt 备份）");
+				}
+				return false;
 			}
 			return RWStorage.set(this.baseKey(), payload);
 		} catch (e) {
@@ -2997,7 +3078,7 @@ function RWMain() {
 			const mod = bcModSdk.registerMod({
 				name: "RelationWeb",
 				fullName: "Relation Web — 关系网收集器",
-				version: "1.4.1",
+				version: "1.4.2",
 				repository: "",
 			}, { allowReplace: true });
 			RWStore.load();
@@ -3029,6 +3110,7 @@ if (typeof module !== "undefined" && module.exports) {
 		RWCollectFromSync, RWCollectFromChar,
 		RWUI, RWUISearchMatch, RWUIVisiblePersons, RWCollectSeen,
 		RWUIDescOpen, RWUIDescClose, RWUIDescSelectNum, RWPersonBioLen,
+		RWSerializeCompact, RWInflateCompact,
 	};
 }
 
